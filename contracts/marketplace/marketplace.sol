@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.20;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Interface for BLR Token
 interface IBLRToken {
@@ -53,12 +54,21 @@ interface IInvestmentPool {
             uint256 share,
             bool hasWithdrawn
         );
+
+    function withdrawAfterMaturityFor(address account) external;
+}
+
+// Interface for Pool Factory
+interface IPoolFactory {
+    function isPoolExists(address pool) external view returns (bool);
 }
 
 contract Marketplace is Ownable, ReentrancyGuard {
-    address public immutable blrToken;
-    uint256 public immutable tradingFee;
+    using SafeERC20 for IBLRToken;
+    address public blrToken;
+    uint256 public tradingFee;
     uint256 public accumulatedFees;
+    address public poolFactory;
 
     struct Listing {
         address seller;
@@ -90,9 +100,15 @@ contract Marketplace is Ownable, ReentrancyGuard {
     event Paused(address indexed owner);
     event Unpaused(address indexed owner);
 
-    constructor(address _blrToken, uint256 _tradingFee) Ownable(msg.sender) {
+    constructor(
+        address _blrToken,
+        uint256 _tradingFee,
+        address _poolFactory
+    ) Ownable(msg.sender) {
+        require(_blrToken != address(0), "Invalid BLR token address");
         blrToken = _blrToken;
         tradingFee = _tradingFee;
+        poolFactory = _poolFactory;
     }
 
     function listShares(
@@ -100,6 +116,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 amount,
         uint256 pricePerShare
     ) external nonReentrant {
+        // Validate pool exists in PoolFactory
+        require(IPoolFactory(poolFactory).isPoolExists(pool), "Invalid pool address");
+        
         IInvestmentPool investmentPool = IInvestmentPool(pool);
         (, , uint256 share, ) = investmentPool.investors(msg.sender);
 
@@ -123,6 +142,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 listingIndex,
         uint256 amount
     ) external nonReentrant {
+        // Validate pool exists in PoolFactory
+        require(IPoolFactory(poolFactory).isPoolExists(pool), "Invalid pool address");
+        
         require(listingIndex < listings[pool].length, "Listing does not exist");
 
         Listing storage listing = listings[pool][listingIndex];
@@ -151,11 +173,16 @@ contract Marketplace is Ownable, ReentrancyGuard {
             9999) / 10000; // rounding up
         uint256 sellerAmount = totalPrice - fee;
 
-        // Transfer the total price from buyer to seller
-        IBLRToken(blrToken).transferFrom(
-            msg.sender,
-            listing.seller,
-            sellerAmount
+        // First transfer the total amount from buyer to contract
+        require(
+            IBLRToken(blrToken).transferFrom(msg.sender, address(this), totalPrice),
+            "Transfer from buyer failed"
+        );
+
+        // Then transfer the seller's portion to the seller
+        require(
+            IBLRToken(blrToken).transfer(listing.seller, sellerAmount),
+            "Transfer to seller failed"
         );
 
         // Accumulate the fee in the contract
@@ -182,6 +209,9 @@ contract Marketplace is Ownable, ReentrancyGuard {
         uint256 listingIndex,
         uint256 amount
     ) external nonReentrant {
+        // Validate pool exists in PoolFactory
+        require(IPoolFactory(poolFactory).isPoolExists(pool), "Invalid pool address");
+        
         require(listingIndex < listings[pool].length, "Listing does not exist");
         Listing storage listing = listings[pool][listingIndex];
         require(listing.seller == msg.sender, "Not the seller of this listing");
@@ -194,16 +224,10 @@ contract Marketplace is Ownable, ReentrancyGuard {
             removeListing(pool, listingIndex);
         }
 
-        // Call withdrawAfterMaturity as the seller, not the Marketplace contract
+        // Verify seller has sufficient shares in the pool
         IInvestmentPool investmentPool = IInvestmentPool(pool);
         (, , uint256 sellerShare, ) = investmentPool.investors(msg.sender);
         require(sellerShare >= amount, "Insufficient shares in pool");
-
-        // Ensure pool has matured before withdrawing
-        require(
-            block.timestamp >= poolEndTime(pool),
-            "Pool has not matured yet"
-        );
 
         // Transfer payout to the seller directly
         withdrawSharesFromPool(pool, msg.sender);
@@ -222,20 +246,15 @@ contract Marketplace is Ownable, ReentrancyGuard {
         (
             uint256 depositedAmount,
             ,
-            uint256 share,
-            bool hasWithdrawn
+            ,
         ) = investmentPool.investors(seller);
-        require(share > 0, "No shares to withdraw");
-        require(!hasWithdrawn, "Already withdrawn");
-
-        // Call withdrawAfterMaturity
-        investmentPool.withdrawAfterMaturity();
-
-        // Calculate payout (assuming 1:1 payout for simplicity)
-        payout = depositedAmount;
+        
+        // Call withdrawAfterMaturity with the seller's address
+        // This will handle all necessary checks internally
+        investmentPool.withdrawAfterMaturityFor(seller);
 
         // Return payout amount
-        return payout;
+        return depositedAmount;
     }
 
     // Add an internal helper to retrieve pool end time
@@ -256,8 +275,16 @@ contract Marketplace is Ownable, ReentrancyGuard {
         require(amount > 0, "No fees to withdraw");
 
         accumulatedFees = 0;
-        IBLRToken(blrToken).transfer(owner(), amount);
+        require(
+            IBLRToken(blrToken).transfer(owner(), amount),
+            "Fee transfer failed"
+        );
 
         emit FeesWithdrawn(owner(), amount);
+    }
+
+    function setPoolFactory(address _poolFactory) external onlyOwner {
+        require(_poolFactory != address(0), "Invalid pool factory address");
+        poolFactory = _poolFactory;
     }
 }
