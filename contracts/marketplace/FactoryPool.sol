@@ -1,42 +1,53 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "./InvestmentPool.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import "./investmentPool.sol";
 
 contract PoolFactory is Ownable, ReentrancyGuard {
+    // State variables
     InvestmentPool[] public pools;
     mapping(address => bool) public existingPools;
+    address public immutable marketplace;
 
+    // Events
     event PoolCreated(
         address indexed poolAddress,
         uint256 maxCapacity,
         uint256 lifespan
     );
 
-    constructor() Ownable(msg.sender) {}
+    constructor(address marketplaceAddress) Ownable(msg.sender) {
+        require(marketplaceAddress != address(0), "Invalid marketplace address");
+        marketplace = marketplaceAddress;
+    }
 
     function createPool(
-        uint256 _maxCapacity,
-        uint256 _poolLifespan,
-        uint256 _earlyWithdrawalPenaltyPercent,
-        address[] memory _approvedStablecoins
+        uint256 maxCapacity,
+        uint256 poolLifespan,
+        uint256 earlyWithdrawalPenaltyPercent,
+        address[] memory approvedStablecoins
     ) external onlyOwner nonReentrant {
+        // Create new investment pool
         InvestmentPool newPool = new InvestmentPool(
-            _maxCapacity,
-            _poolLifespan,
-            _earlyWithdrawalPenaltyPercent
+            maxCapacity,
+            poolLifespan,
+            earlyWithdrawalPenaltyPercent,
+            marketplace
         );
         pools.push(newPool);
         existingPools[address(newPool)] = true;
 
         // Initialize approved stablecoins
-        for (uint256 i = 0; i < _approvedStablecoins.length; i++) {
-            newPool.modifyApprovedStablecoin(_approvedStablecoins[i], true);
+        for (uint256 i = 0; i < approvedStablecoins.length; i++) {
+            newPool.modifyApprovedStablecoin(approvedStablecoins[i], true);
         }
 
-        emit PoolCreated(address(newPool), _maxCapacity, _poolLifespan);
+        emit PoolCreated(address(newPool), maxCapacity, poolLifespan);
     }
 
     function getPoolsCount() external view returns (uint256) {
@@ -64,14 +75,14 @@ contract PoolFactory is Ownable, ReentrancyGuard {
     }
 
     function modifyApprovedStablecoinForPool(
-        address _poolAddress,
-        address _stablecoin,
-        bool _status
+        address poolAddress,
+        address stablecoin,
+        bool status
     ) external onlyOwner nonReentrant {
-        require(existingPools[_poolAddress], "Pool does not exist");
-        InvestmentPool(_poolAddress).modifyApprovedStablecoin(
-            _stablecoin,
-            _status
+        require(existingPools[poolAddress], "Pool does not exist");
+        InvestmentPool(poolAddress).modifyApprovedStablecoin(
+            stablecoin,
+            status
         );
     }
 
